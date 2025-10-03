@@ -111,6 +111,22 @@ impl BlockCandidate {
         }
     }
 
+    pub fn x(&self) -> f32 {
+        self.x
+    }
+
+    pub fn y(&self) -> f32 {
+        self.y
+    }
+
+    pub fn scale(&self) -> f32 {
+        self.scale
+    }
+
+    pub fn texture(&self) -> &Arc<RgbaImage> {
+        &self.texture
+    }
+
     fn for_each_relevant_pixel<F>(
         &self,
         canvas_width: u32,

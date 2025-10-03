@@ -1,0 +1,159 @@
+#version 450
+
+// Compute shader for calculating block candidate scores (GLSL version)
+// This replaces the CPU-based score calculation with GPU acceleration
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+struct BlockCandidate {
+    float x;
+    float y;
+    float scale;
+    uint texture_index;
+    float score;
+    vec3 padding;
+};
+
+layout(std430, binding = 0) readonly buffer TargetImage {
+    vec4 target_image[];
+};
+
+layout(std430, binding = 1) readonly buffer CurrentCanvas {
+    vec4 current_canvas[];
+};
+
+layout(std430, binding = 2) readonly buffer TextureData {
+    vec4 texture_data[];
+};
+
+layout(std430, binding = 3) buffer Blocks {
+    BlockCandidate blocks[];
+};
+
+layout(std140, binding = 4) uniform Uniforms {
+    uint canvas_width;
+    uint canvas_height;
+    uint texture_width;
+    uint texture_height;
+    float base_ssd;
+    uint sampling_rate;
+    vec2 padding;
+} uniforms;
+
+// Alpha blending function
+vec4 blend_pixels(vec4 base, vec4 overlay) {
+    float alpha = overlay.a;
+    float one_minus_alpha = 1.0 - alpha;
+    
+    return vec4(
+        base.r * one_minus_alpha + overlay.r * alpha,
+        base.g * one_minus_alpha + overlay.g * alpha,
+        base.b * one_minus_alpha + overlay.b * alpha,
+        base.a * one_minus_alpha + overlay.a * alpha
+    );
+}
+
+// Calculate squared difference between two colors
+float color_difference_squared(vec4 a, vec4 b) {
+    vec4 diff = a - b;
+    return dot(diff, diff);
+}
+
+// Sample texture with nearest neighbor
+vec4 sample_texture(float tex_x, float tex_y) {
+    uint x_clamped = min(uint(tex_x), uniforms.texture_width - 1u);
+    uint y_clamped = min(uint(tex_y), uniforms.texture_height - 1u);
+    uint index = y_clamped * uniforms.texture_width + x_clamped;
+    return texture_data[index];
+}
+
+void main() {
+    uint block_index = gl_GlobalInvocationID.x;
+    
+    // Check if this thread should process a block
+    if (block_index >= blocks.length()) {
+        return;
+    }
+    
+    BlockCandidate block = blocks[block_index];
+    
+    // Calculate block bounds
+    float half_scale = block.scale * 0.5;
+    float block_x_start = block.x - half_scale;
+    float block_y_start = block.y - half_scale;
+    float block_x_end = block.x + half_scale;
+    float block_y_end = block.y + half_scale;
+    
+    // Clamp to canvas bounds
+    uint loop_start_x = uint(max(floor(block_x_start), 0.0));
+    uint loop_end_x = uint(min(ceil(block_x_end), float(uniforms.canvas_width)));
+    uint loop_start_y = uint(max(floor(block_y_start), 0.0));
+    uint loop_end_y = uint(min(ceil(block_y_end), float(uniforms.canvas_height)));
+    
+    // Check if block is valid
+    if (loop_start_x >= loop_end_x || loop_start_y >= loop_end_y) {
+        blocks[block_index].score = 999999999.0;
+        return;
+    }
+    
+    float delta_ssd = 0.0;
+    uint pixels_sampled = 0u;
+    uint step = uniforms.sampling_rate;
+    
+    // Calculate texture dimensions
+    float tex_width_f = float(uniforms.texture_width);
+    float tex_height_f = float(uniforms.texture_height);
+    
+    // Iterate through pixels in the block area
+    for (uint cy = loop_start_y; cy < loop_end_y; cy += step) {
+        for (uint cx = loop_start_x; cx < loop_end_x; cx += step) {
+            // Calculate position within the block
+            float x_in_block = float(cx) - block_x_start;
+            float y_in_block = float(cy) - block_y_start;
+            
+            // Normalize to [0, 1]
+            float norm_x = x_in_block / block.scale;
+            float norm_y = y_in_block / block.scale;
+            
+            // Map to texture coordinates
+            float tex_x = norm_x * tex_width_f;
+            float tex_y = norm_y * tex_height_f;
+            
+            // Sample texture
+            vec4 block_pixel = sample_texture(tex_x, tex_y);
+            
+            // Get canvas index
+            uint canvas_idx = cy * uniforms.canvas_width + cx;
+            
+            // Get pixels from target and current canvas
+            vec4 target_pixel = target_image[canvas_idx];
+            vec4 current_pixel = current_canvas[canvas_idx];
+            
+            // Blend the block pixel with current canvas pixel
+            vec4 blended_pixel = blend_pixels(current_pixel, block_pixel);
+            
+            // Calculate the change in error
+            float old_diff = color_difference_squared(target_pixel, current_pixel);
+            float new_diff = color_difference_squared(target_pixel, blended_pixel);
+            
+            delta_ssd += (new_diff - old_diff);
+            pixels_sampled += 1u;
+        }
+    }
+    
+    // Scale up delta_ssd if we used sampling
+    float effective_delta_ssd = delta_ssd;
+    if (step > 1u && pixels_sampled > 0u) {
+        uint width_in_loop = loop_end_x - loop_start_x;
+        uint height_in_loop = loop_end_y - loop_start_y;
+        float total_pixels = float(width_in_loop * height_in_loop);
+        
+        if (total_pixels > 0.0) {
+            effective_delta_ssd = delta_ssd * (total_pixels / float(pixels_sampled));
+        }
+    }
+    
+    // Calculate final score
+    float new_score = uniforms.base_ssd + effective_delta_ssd;
+    blocks[block_index].score = max(new_score, 0.0);
+}
