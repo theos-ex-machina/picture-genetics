@@ -106,13 +106,27 @@ impl PictureGeneticsApp {
         self.progress_receiver = Some(rx);
 
         // Clone parameters for the thread
-        let target_image_path = format!("input\\{}", self.target_image_path);
+        // Check if target_image_path is already a full path (contains : or starts with \)
+        let target_image_path =
+            if self.target_image_path.contains(':') || self.target_image_path.starts_with('\\') {
+                self.target_image_path.clone()
+            } else {
+                format!("input\\{}", self.target_image_path)
+            };
+
         let render_from_scratch = self.render_from_scratch;
+
+        // Check if base_image_path is already a full path
         let base_image_path = if !self.render_from_scratch && !self.base_image_path.is_empty() {
-            Some(format!("output\\{}.png", self.base_image_path))
+            if self.base_image_path.contains(':') || self.base_image_path.starts_with('\\') {
+                Some(self.base_image_path.clone())
+            } else {
+                Some(format!("output\\{}.png", self.base_image_path))
+            }
         } else {
             None
         };
+
         let output_filename = format!("{}\\{}.png", self.output_path, self.output_filename);
         let num_blocks = self.num_blocks;
         let blocks_per_iteration = self.blocks_per_iteration;
@@ -700,25 +714,34 @@ impl eframe::App for PictureGeneticsApp {
                     // Target Image Selection
                     ui.horizontal(|ui| {
                         ui.label("Target Image:");
-                        egui::ComboBox::from_label("")
-                            .selected_text(if self.target_image_path.is_empty() {
-                                "Select an image..."
-                            } else {
-                                &self.target_image_path
-                            })
+                        ui.label(if self.target_image_path.is_empty() {
+                            "No image selected"
+                        } else {
+                            &self.target_image_path
+                        });
+                    });
+
+                    ui.horizontal(|ui| {
+                        if ui.button("📁 Browse for Target Image...").clicked() {
+                            if let Some(path) = rfd::FileDialog::new()
+                                .add_filter("Images", &["png", "jpg", "jpeg", "webp", "bmp"])
+                                .set_title("Select Target Image")
+                                .pick_file()
+                            {
+                                self.target_image_path = path.display().to_string();
+                            }
+                        }
+
+                        // Quick select from input folder
+                        egui::ComboBox::from_label("or select from input/")
+                            .selected_text("Quick select...")
                             .show_ui(ui, |ui| {
                                 for image_name in &self.available_images {
-                                    ui.selectable_value(
-                                        &mut self.target_image_path,
-                                        image_name.clone(),
-                                        image_name,
-                                    );
+                                    if ui.selectable_label(false, image_name).clicked() {
+                                        self.target_image_path = format!("input/{}", image_name);
+                                    }
                                 }
                             });
-
-                        if ui.button("Refresh").clicked() {
-                            self.load_available_images();
-                        }
                     });
 
                     ui.separator();
@@ -760,8 +783,22 @@ impl eframe::App for PictureGeneticsApp {
                     if !self.render_from_scratch {
                         ui.horizontal(|ui| {
                             ui.label("Base image:");
-                            ui.text_edit_singleline(&mut self.base_image_path);
+                            ui.label(if self.base_image_path.is_empty() {
+                                "No base image selected"
+                            } else {
+                                &self.base_image_path
+                            });
                         });
+
+                        if ui.button("📁 Browse for Base Image...").clicked() {
+                            if let Some(path) = rfd::FileDialog::new()
+                                .add_filter("Images", &["png", "jpg", "jpeg", "webp", "bmp"])
+                                .set_title("Select Base Image")
+                                .pick_file()
+                            {
+                                self.base_image_path = path.display().to_string();
+                            }
+                        }
                     }
 
                     ui.separator();
